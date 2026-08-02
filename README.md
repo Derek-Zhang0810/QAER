@@ -1,4 +1,4 @@
-# QAER: Query-Adaptive Evidence Reasoning for Temporal Knowledge Graph Extrapolation
+# QAER: Query-Adaptive Evidence Routing for Temporal Knowledge Graph Extrapolation
 
 This repository contains the official implementation of **QAER**, an evidence-aware method for temporal knowledge graph (TKG) extrapolation. Given a query `(subject, relation, ?, timestamp)`, QAER ranks every entity as a possible tail while exposing the historical evidence used by its scoring process.
 
@@ -75,7 +75,7 @@ On the first run, `history_preprocess.py` automatically generates the required h
 
 | Dataset | Entities | Relations | Train | Validation | Test |
 |---|---:|---:|---:|---:|---:|
-| ICEWS14 | 7,128 | 230 | 74,845 | 8,514 | 7,371 |
+| ICEWS14 | 6,869 | 230 | 74,845 | 8,514 | 7,371 |
 | ICEWS18 | 23,033 | 256 | 373,018 | 45,995 | 49,545 |
 | ICEWS05-15 | 10,488 | 251 | 368,868 | 46,302 | 46,159 |
 | GDELT | 7,691 | 240 | 1,734,399 | 238,765 | 305,241 |
