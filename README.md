@@ -117,7 +117,7 @@ Key settings include:
 | Early-stopping patience | 5 validations |
 | Minimum MRR improvement | 0.0001 |
 
-The best checkpoint is selected using validation MRR. Training stops when validation MRR fails to improve by more than `0.0001` for five consecutive validations, or after 20 epochs. Test labels are never used for checkpoint selection or calibration.
+For training efficiency, full local-graph/history contexts and exact path evidence are constructed for a scheduled subset of training queries, while the remaining queries use zero graph/history contexts and proxy path support. Validation and test evaluation use the full evidence construction.
 
 ## One-Click Commands
 
