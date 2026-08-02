@@ -113,7 +113,7 @@ Key settings include:
 | Learning rate | 0.0007 |
 | Batch size | 512 |
 | Maximum epochs | 20 |
-| Minimum epochs | 2 |
+| Minimum epochs | 5 |
 | Validation frequency | every epoch |
 | Early-stopping patience | 5 validations |
 | Minimum MRR improvement | 0.0001 |
