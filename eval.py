@@ -2,6 +2,7 @@ import argparse
 import csv
 import itertools
 import json
+import math
 from pathlib import Path
 from typing import Dict, List
 
@@ -18,6 +19,7 @@ from score_calibration import (
     load_score_calibration,
     save_score_calibration,
 )
+from temporal_graph import TemporalEdge, TemporalPath, temporal_path_to_text
 from utils import aggregate_ranking_metrics, filtered_rank, resolve_device, save_json
 
 
@@ -313,6 +315,147 @@ def _path_to_natural_text(path_payload: Dict, entity_texts: List[str], relation_
     return " ".join(chunks)
 
 
+def _recover_temporal_paths_for_predictions(
+        local_edges: List[TemporalEdge],
+        subject: int,
+        query_relation: int,
+        query_time: int,
+        candidate_entities: List[int],
+        path_prior_entities: List[int],
+        path_prior_weights: List[float],
+        data_config,
+        num_relations: int,
+        top_k_paths: int,
+) -> Dict[int, List[Dict]]:
+    """Recover score-neutral path explanations after the final ranking is fixed."""
+    if top_k_paths <= 0 or not local_edges or not candidate_entities:
+        return {}
+
+    path_support = {
+        int(entity): float(weight)
+        for entity, weight in zip(path_prior_entities, path_prior_weights)
+        if float(weight) > 0.0
+    }
+    requested = {
+        int(entity)
+        for entity in candidate_entities
+        if int(entity) != int(subject) and int(entity) in path_support
+    }
+    if not requested:
+        return {}
+
+    adjacency: Dict[int, List[TemporalEdge]] = {}
+    use_reverse = bool(getattr(data_config, "path_prior_use_reverse", False))
+    for edge in local_edges:
+        if int(edge.timestamp) >= int(query_time):
+            continue
+        adjacency.setdefault(int(edge.src), []).append(edge)
+        if use_reverse:
+            reverse_edge = TemporalEdge(
+                src=int(edge.dst),
+                rel=int(edge.rel) + int(num_relations),
+                dst=int(edge.src),
+                timestamp=int(edge.timestamp),
+            )
+            adjacency.setdefault(reverse_edge.src, []).append(reverse_edge)
+
+    max_branches = max(1, int(getattr(data_config, "path_prior_max_branches", 8)))
+    for node, edges in adjacency.items():
+        adjacency[node] = sorted(
+            edges,
+            key=lambda item: int(item.timestamp),
+            reverse=True,
+        )[:max_branches]
+
+    max_len = max(1, int(getattr(data_config, "max_path_len", 3)))
+    state_limit = max(1, int(getattr(data_config, "path_prior_state_limit", 96)))
+    length_decay = float(getattr(data_config, "path_prior_length_decay", 1.0))
+    relation_bonus = float(getattr(data_config, "path_prior_relation_bonus", 0.0))
+    time_decay = float(getattr(data_config, "prior_time_decay", 0.0))
+    base_relation = int(query_relation) % int(num_relations)
+
+    collected: Dict[int, List[TemporalPath]] = {entity: [] for entity in requested}
+    states = [(int(subject), -10 ** 12, [int(subject)], [], [], 1.0)]
+    for depth in range(1, max_len + 1):
+        next_states = {}
+        for node, previous_time, nodes, relations, timestamps, prefix_score in states:
+            for edge in adjacency.get(int(node), []):
+                edge_time = int(edge.timestamp)
+                if edge_time < int(previous_time):
+                    continue
+                destination = int(edge.dst)
+                if destination == int(subject):
+                    continue
+                edge_relation = int(edge.rel)
+                relation_weight = 1.0
+                if edge_relation == int(query_relation):
+                    relation_weight += relation_bonus
+                elif edge_relation % int(num_relations) == base_relation:
+                    relation_weight += 0.5 * relation_bonus
+                recency = math.exp(-time_decay * max(0, int(query_time) - edge_time))
+                path_score = (
+                    float(prefix_score)
+                    * recency
+                    * (length_decay ** max(0, depth - 1))
+                    * relation_weight
+                )
+                next_nodes = nodes + [destination]
+                next_relations = relations + [edge_relation]
+                next_timestamps = timestamps + [edge_time]
+                if destination in requested:
+                    collected[destination].append(
+                        TemporalPath(
+                            nodes=next_nodes,
+                            relations=next_relations,
+                            timestamps=next_timestamps,
+                            score=float(path_score),
+                        )
+                    )
+                state_key = (destination, edge_time)
+                previous_state = next_states.get(state_key)
+                if previous_state is None or path_score > previous_state[-1]:
+                    next_states[state_key] = (
+                        destination,
+                        edge_time,
+                        next_nodes,
+                        next_relations,
+                        next_timestamps,
+                        float(path_score),
+                    )
+        if not next_states:
+            break
+        states = sorted(next_states.values(), key=lambda item: item[-1], reverse=True)[:state_limit]
+
+    max_paths_per_candidate = int(getattr(data_config, "max_paths_per_candidate", top_k_paths))
+    path_limit = int(top_k_paths)
+    if max_paths_per_candidate > 0:
+        path_limit = min(path_limit, max_paths_per_candidate)
+    recovered = {}
+    for candidate, paths in collected.items():
+        payloads = []
+        seen = set()
+        for path in sorted(paths, key=lambda item: (-float(item.score), len(item.relations))):
+            signature = (tuple(path.nodes), tuple(path.relations), tuple(path.timestamps))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            payloads.append(
+                {
+                    "nodes": [int(node) for node in path.nodes],
+                    "relations": [int(relation) for relation in path.relations],
+                    "timestamps": [int(timestamp) for timestamp in path.timestamps],
+                    "path_score": float(path.score),
+                    "path_prior_support": float(path_support[candidate]),
+                    "text": temporal_path_to_text(path),
+                }
+            )
+            if len(payloads) >= path_limit:
+                break
+        if payloads:
+            recovered[int(candidate)] = payloads
+    return recovered
+
+
 def _find_weight(entity: int, entities: List[int], weights: List[float]) -> float:
     for candidate, weight in zip(entities, weights):
         if int(candidate) == int(entity):
@@ -577,6 +720,7 @@ def save_evidence_csv(rows: List[Dict], output_csv: str) -> None:
         "raw_prediction_score",
         "raw_top_predictions",
         "score_breakdown",
+        "temporal_paths",
         "structured_evidence_chain",
     ]
     with open(path, "w", encoding="utf-8-sig", newline="") as fp:
@@ -593,9 +737,10 @@ def evaluate_checkpoint(
         output_csv: str = "",
         config_path: str = "",
         max_eval_batches: int = 0,
+        device_name: str = "cuda",
 ) -> \
         Dict[str, float]:
-    device = resolve_device("cuda")
+    device = resolve_device(device_name)
     model, config = load_model(checkpoint_path, device, config_path=config_path)
     _enable_cuda_fast_math(device)
     if dataset_dir:
@@ -631,14 +776,21 @@ def evaluate_checkpoint(
         "rank_le_10_but_target_absent_from_saved_top_predictions": 0,
         "saved_top_predictions_total": 0,
     }
+    path_recovery_audit = {
+        "top_predictions_with_path_support": 0,
+        "top_predictions_with_recovered_paths": 0,
+        "recovered_paths_total": 0,
+    }
     use_amp = config.train.use_amp and device.type == "cuda"
     print(
         {
             "stage": "eval_setup",
             "metric_path_rerank": False,
             "path_prior_scoring": True,
+            "path_explanation_recovery": int(config.explain.top_k_paths) > 0,
+            "top_k_paths_per_prediction": int(config.explain.top_k_paths),
             "validation_calibration": bool(calibration.get("enabled", False)),
-            "note": "Final ranking now matches validation: path prior can support scores, but untrained explicit path reranking is disabled.",
+            "note": "Temporal paths are recovered only after final ranking; explanation export does not alter scores or metrics.",
         },
         flush=True,
     )
@@ -716,11 +868,32 @@ def evaluate_checkpoint(
                     )
                     if predicted_entity >= 0 else {}
                 )
+                explanations = _recover_temporal_paths_for_predictions(
+                    local_edges=batch.get("local_edges", [[]])[row],
+                    subject=subject,
+                    query_relation=relation,
+                    query_time=query_time,
+                    candidate_entities=[int(item["entity"]) for item in predictions],
+                    path_prior_entities=batch.get("path_prior_entities", [[]])[row],
+                    path_prior_weights=batch.get("path_prior_weights", [[]])[row],
+                    data_config=config.data,
+                    num_relations=dataset.num_relations,
+                    top_k_paths=int(config.explain.top_k_paths),
+                )
+                for candidate_paths in explanations.values():
+                    for path_payload in candidate_paths:
+                        path_payload["natural_text"] = _path_to_natural_text(
+                            path_payload,
+                            dataset.entity_texts,
+                            dataset.relation_texts,
+                        )
                 if predictions:
                     enriched_predictions = []
                     for prediction in predictions:
                         prediction_entity = int(prediction["entity"])
                         enriched_prediction = dict(prediction)
+                        candidate_paths = explanations.get(prediction_entity, [])
+                        enriched_prediction["temporal_paths"] = candidate_paths
                         enriched_prediction["score_breakdown"] = _score_breakdown(
                             entity=prediction_entity,
                             row=row,
@@ -731,6 +904,14 @@ def evaluate_checkpoint(
                             gate_mask=gate_mask,
                             gate_support=gate_support,
                         )
+                        path_support = _find_weight(
+                            prediction_entity,
+                            batch.get("path_prior_entities", [[]])[row],
+                            batch.get("path_prior_weights", [[]])[row],
+                        )
+                        path_recovery_audit["top_predictions_with_path_support"] += int(path_support > 0.0)
+                        path_recovery_audit["top_predictions_with_recovered_paths"] += int(bool(candidate_paths))
+                        path_recovery_audit["recovered_paths_total"] += len(candidate_paths)
                         enriched_predictions.append(enriched_prediction)
                     predictions = enriched_predictions
                     score_breakdown = predictions[0]["score_breakdown"]
@@ -743,7 +924,6 @@ def evaluate_checkpoint(
                     rank_audit["rank_le_1_but_target_absent_from_saved_top_predictions"] += int(rank <= 1)
                     rank_audit["rank_le_3_but_target_absent_from_saved_top_predictions"] += int(rank <= 3)
                     rank_audit["rank_le_10_but_target_absent_from_saved_top_predictions"] += int(rank <= 10)
-                explanations = output["explanations"][row]
                 evidence_target = predicted_entity if predicted_entity >= 0 else raw_predicted_entity
                 raw_predicted_label = (
                     f"{_label(dataset.entity_texts, raw_predicted_entity)} ({raw_predicted_entity})"
@@ -780,6 +960,10 @@ def evaluate_checkpoint(
                         "raw_prediction_score": f"{raw_prediction_score:.6f}",
                         "raw_top_predictions": raw_top_prediction_text,
                         "score_breakdown": json.dumps(score_breakdown, ensure_ascii=False),
+                        "temporal_paths": json.dumps(
+                            explanations.get(int(evidence_target), []),
+                            ensure_ascii=False,
+                        ),
                         "structured_evidence_chain": evidence_text,
                     }
                 )
@@ -807,12 +991,19 @@ def evaluate_checkpoint(
             rank_audit["saved_top_predictions_total"] / rank_audit["evaluated_examples"]
         )
         print({"stage": "rank_audit", **rank_audit}, flush=True)
+    supported_predictions = path_recovery_audit["top_predictions_with_path_support"]
+    path_recovery_audit["supported_prediction_recovery_rate"] = (
+        path_recovery_audit["top_predictions_with_recovered_paths"] / supported_predictions
+        if supported_predictions > 0 else 0.0
+    )
+    print({"stage": "path_recovery_audit", **path_recovery_audit}, flush=True)
     if output_json:
         save_json(
             {
                 "split": split,
                 "metrics": metrics,
                 "rank_audit": rank_audit,
+                "path_recovery_audit": path_recovery_audit,
                 "records": evidence_records,
             },
             output_json,
@@ -847,8 +1038,13 @@ def _apply_calibration_config_override(config, config_path: str) -> None:
     )
 
 
-def fit_checkpoint_calibration(checkpoint_path: str, dataset_dir: str = "", config_path: str = "") -> Dict:
-    device = resolve_device("cuda")
+def fit_checkpoint_calibration(
+        checkpoint_path: str,
+        dataset_dir: str = "",
+        config_path: str = "",
+        device_name: str = "cuda",
+) -> Dict:
+    device = resolve_device(device_name)
     model, config = load_model(checkpoint_path, device, config_path=config_path)
     _apply_calibration_config_override(config, config_path)
     if dataset_dir:
@@ -891,6 +1087,7 @@ def main() -> None:
     parser.add_argument("--split", type=str, default="test", choices=["train", "valid", "test"])
     parser.add_argument("--output-json", type=str, default="")
     parser.add_argument("--output-csv", type=str, default="")
+    parser.add_argument("--device", type=str, default="cuda", help="Evaluation device, e.g. cpu or cuda")
     parser.add_argument(
         "--fit-calibration",
         action="store_true",
@@ -909,6 +1106,7 @@ def main() -> None:
             checkpoint_path=args.checkpoint,
             dataset_dir=args.dataset_dir,
             config_path=args.config,
+            device_name=args.device,
         )
 
     evaluate_checkpoint(
@@ -919,6 +1117,7 @@ def main() -> None:
         output_csv=args.output_csv,
         config_path=args.config,
         max_eval_batches=args.max_eval_batches,
+        device_name=args.device,
     )
 
 

@@ -111,6 +111,7 @@ def main() -> None:
         split=args.eval_split,
         output_json=str(predictions_json),
         output_csv=str(evidence_csv),
+        device_name=config.train.device,
     )
     metrics_payload = {
         "checkpoint": checkpoint,

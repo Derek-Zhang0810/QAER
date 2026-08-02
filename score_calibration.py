@@ -459,7 +459,9 @@ def _cache_calibration_batches(
         max_batches: int = 0,
 ) -> List[Dict]:
     cached_batches = []
-    with torch.inference_mode():
+    # Cached model scores are constants during calibration, but they must remain
+    # ordinary tensors because trainable calibration parameters use them in autograd.
+    with torch.no_grad():
         cache_iter = valid_loader
         total_batches = len(valid_loader)
         if max_batches > 0:

@@ -43,7 +43,7 @@ For each query, QAER constructs six historical evidence sources:
 - `global`: recent candidate-tail frequency;
 - `path`: temporally valid reachability from the subject to the candidate.
 
-A query-adaptive evidence router assigns weights to these sources. Their routed support is combined with the neural score while preserving full-entity ranking. The evaluation output records source-level score contributions and supporting historical paths, so the direct evidence term can be inspected rather than attached only after prediction.
+A query-adaptive evidence router assigns weights to these sources. Their routed support is combined with the neural score while preserving full-entity ranking. The evaluation output records source-level score contributions and, when graph-derived path support is available, the corresponding timestamped historical paths.
 
 ## Environment
 
@@ -126,37 +126,37 @@ Run each command from the repository root. The commands train QAER, validate aft
 ### ICEWS14
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name ICEWS14 --output-dir outputs\ICEWS14\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name ICEWS14 --output-dir outputs/ICEWS14/QAER --device cuda
 ```
 
 ### ICEWS18
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name ICEWS18 --output-dir outputs\ICEWS18\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name ICEWS18 --output-dir outputs/ICEWS18/QAER --device cuda
 ```
 
 ### ICEWS05-15
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name ICEWS05-15 --output-dir outputs\ICEWS05-15\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name ICEWS05-15 --output-dir outputs/ICEWS05-15/QAER --device cuda
 ```
 
 ### GDELT
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name GDELT --output-dir outputs\GDELT\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name GDELT --output-dir outputs/GDELT/QAER --device cuda
 ```
 
 ### YAGO
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name YAGO --output-dir outputs\YAGO\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name YAGO --output-dir outputs/YAGO/QAER --device cuda
 ```
 
 ### WIKI
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name WIKI --output-dir outputs\WIKI\QAER --device cuda
+python main.py --config config_presets/qaer.json --dataset-name WIKI --output-dir outputs/WIKI/QAER --device cuda
 ```
 
 For CPU execution, replace `--device cuda` with `--device cpu`. CPU training is considerably slower.
@@ -166,7 +166,7 @@ For CPU execution, replace `--device cuda` with `--device cpu`. CPU training is 
 After training, an existing checkpoint can be evaluated without retraining:
 
 ```powershell
-python main.py --config config_presets\qaer.json --dataset-name ICEWS14 --output-dir outputs\ICEWS14\QAER --skip-train --checkpoint outputs\ICEWS14\QAER\best_model.pt --eval-split test --device cuda
+python main.py --config config_presets/qaer.json --dataset-name ICEWS14 --output-dir outputs/ICEWS14/QAER --skip-train --checkpoint outputs/ICEWS14/QAER/best_model.pt --eval-split test --device cuda
 ```
 
 ## Generated Outputs
@@ -183,7 +183,9 @@ test_predictions_with_paths.json
 test_structured_evidence_chains.csv
 ```
 
-`test_predictions_with_paths.json` contains ranked predictions, router weights, source-level score breakdowns, and available temporal-path evidence.
+`test_predictions_with_paths.json` contains ranked predictions, router weights, source-level score breakdowns, and available temporal-path evidence. Each saved prediction has a `temporal_paths` list whose entries contain node IDs, relation IDs, timestamps, the path score, normalized path-prior support, and a human-readable path. The same paths are grouped by candidate in `candidate_explanations`, while `path_recovery_audit` reports their output coverage. The CSV file stores the top prediction's paths in the `temporal_paths` column and renders them in readable form in `structured_evidence_chain`.
+
+Explicit path reranking remains disabled during evaluation (`eval_path_topk=0`). After validation calibration and full-entity ranking determine the final Top-K predictions, QAER performs a score-neutral recovery pass over the same local historical graph used by path evidence. Recovery retains only edges before the query time, enforces nondecreasing timestamps along a path, and uses the configured path length, branch, and state limits. It changes neither candidate scores nor ranking metrics and is used only to serialize explanations.
 
 ## Publishing the Data Directory
 
